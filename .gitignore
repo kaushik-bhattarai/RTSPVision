@@ -1,0 +1,7 @@
+/.vscode/settings.json
+/.env
+/__pycache__/
+/captures/
+
+/yolov8n.pt
+/yolo11n.pt
