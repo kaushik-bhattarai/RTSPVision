@@ -8,8 +8,7 @@ import cv2
 import numpy as np
 from ultralytics import YOLO
 
-#REGION_POINTS = [(342,192), (355,240), (393,0), (364,0)]    
-REGION_POINTS = [(345,164), (368,186), (395,0), (364,0)]    
+REGION_POINTS = [(345, 164), (368, 186), (395, 0), (364, 0)]
 
 MODEL_PATH = "yolov8n.pt"
 PERSON_CLASS_ID = 0
@@ -21,7 +20,7 @@ ENTRY_LOG_PATH = os.path.join(CAPTURES_DIR, "entries_log.csv")
 
 class ZoneEntryCounter:
     """
-    Own thread. Runs YOLO human detection, draws a box
+    Own thread. Runs YOLO human detection on the full frame, draws a box
     for every detected person, and checks whether ANY person's point
     currently falls inside the polygon.
     """
@@ -37,15 +36,16 @@ class ZoneEntryCounter:
         self.grabber = grabber
         self.model = YOLO(model_path)
         self.region_np = np.array(region_points, dtype=np.int32)
-
         self.captures_dir = captures_dir
         self.log_path = log_path
-        self._prepare_storage()
-
         self.lock = threading.Lock()
         self.annotated_frame = None
         self.entry_count = 0
+        self.exit_count = 0
+        self._event_count = self._prepare_storage() # Start counting from the last event ID in the log
         self.flag = False
+
+        # Internal only - used to detect the rising edge.
         self._zone_occupied_prev = False
 
         self.stopped = False
@@ -57,7 +57,17 @@ class ZoneEntryCounter:
         if not os.path.exists(self.log_path):
             with open(self.log_path, "w", newline="") as f:
                 writer = csv.writer(f)
-                writer.writerow(["entry_id", "timestamp", "image_path"])
+                writer.writerow(["event_id", "event_type", "timestamp", "image_path"])
+            return 0
+        
+        last_event_id = 0
+        with open(self.log_path, "r", newline="") as f:
+            reader = csv.reader(f)
+            next(reader, None)  # Skip header
+            for row in reader:
+                if row:
+                    last_event_id = int(row[0])
+        return last_event_id
 
     def start(self):
         self.thread.start()
@@ -66,27 +76,38 @@ class ZoneEntryCounter:
     def _is_inside(self, point):
         return cv2.pointPolygonTest(self.region_np, point, False) >= 0
 
-    def _save_entry(self, frame, box_xyxy):
-        """Crop the triggering person's box, save it, and log the timestamp."""
-        x1, y1, x2, y2 = box_xyxy
-        h, w = frame.shape[:2]
-        x1, y1 = max(0, x1), max(0, y1)
-        x2, y2 = min(w, x2), min(h, y2)
+    def _save_event(self, frame, box_xyxy, event_type):
+        """Crop the relevant person's box (or save the full frame if no
+        box is available at the moment of the trigger), then log it."""
+        if box_xyxy is not None:
+            x1, y1, x2, y2 = box_xyxy
+            h, w = frame.shape[:2]
+            x1, y1 = max(0, x1), max(0, y1)
+            x2, y2 = min(w, x2), min(h, y2)
+            crop = frame[y1:y2, x1:x2]
+            if crop.size == 0:
+                crop = frame
+        else:
+            crop = frame
 
-        crop = frame[y1:y2, x1:x2]
-        if crop.size == 0:
-            crop = frame  # Fallback to the full frame if the crop is empty
-
+        self._event_count += 1
         now = datetime.now()
         timestamp_str = now.strftime("%Y-%m-%d_%H-%M-%S")
-        filename = f"entry_{self.entry_count:04d}_{timestamp_str}.jpg"
+        filename = f"event_{self._event_count:04d}_{event_type}_{timestamp_str}.jpg"
         image_path = os.path.join(self.captures_dir, filename)
 
         cv2.imwrite(image_path, crop)
 
         with open(self.log_path, "a", newline="") as f:
             writer = csv.writer(f)
-            writer.writerow([self.entry_count, now.isoformat(sep=" ", timespec="seconds"), image_path])
+            writer.writerow(
+                [
+                    self._event_count,
+                    event_type,
+                    now.isoformat(sep=" ", timespec="seconds"),
+                    image_path,
+                ]
+            )
 
     def _update(self):
         while not self.stopped:
@@ -134,12 +155,16 @@ class ZoneEntryCounter:
                 )
                 cv2.circle(frame, point, 4, color, -1)
 
+            # crossing: same trigger every time (rising edge). Which label
+            # it gets - enter or exit - just alternates with self.flag.
             if zone_occupied_this_frame and not self._zone_occupied_prev:
                 self.flag = not self.flag
                 if self.flag:
                     self.entry_count += 1
-                    if triggering_box is not None:
-                        self._save_entry(clean_frame, triggering_box)
+                    self._save_event(clean_frame, triggering_box, "enter")
+                else:
+                    self.exit_count += 1
+                    self._save_event(clean_frame, triggering_box, "exit")
 
             self._zone_occupied_prev = zone_occupied_this_frame
 
@@ -151,10 +176,10 @@ class ZoneEntryCounter:
             # Overlay counters
             cv2.putText(
                 frame,
-                f"Zone entries: {self.entry_count}",
+                f"Entries: {self.entry_count}  Exits: {self.exit_count}",
                 (400, 40),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.9,
+                0.5,
                 (255, 0, 0),
                 2,
             )
