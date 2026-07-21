@@ -35,7 +35,6 @@ def main():
                 break
     finally:
         print(f"Final zone entry count: {counter.entry_count}")
-        print(f"Entry log: {counter.log_path}")
         counter.stop()
         grabber.stop()
         cv2.destroyAllWindows()
