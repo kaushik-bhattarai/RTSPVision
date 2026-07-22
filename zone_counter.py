@@ -2,13 +2,17 @@ import os
 import csv
 import time
 import threading
+import traceback
 from datetime import datetime
 
 import cv2
 import numpy as np
 from ultralytics import YOLO
 
-REGION_POINTS = [(345, 164), (368, 186), (395, 0), (364, 0)]
+import reid_tracker
+
+#region points for the polygonal zone to monitor. 
+REGION_POINTS = [(1035,570), (1088,620), (1186,0), (1100,0)]
 
 MODEL_PATH = "yolov8n.pt"
 PERSON_CLASS_ID = 0
@@ -49,8 +53,9 @@ class ZoneEntryCounter:
         self._zone_occupied_prev = False
 
         self.stopped = False
+        self.crashed = False
 
-        self.thread = threading.Thread(target=self._update, daemon=True)
+        self.thread = threading.Thread(target=self._run, daemon=True)
 
     def _prepare_storage(self):
         os.makedirs(self.captures_dir, exist_ok=True)
@@ -108,6 +113,32 @@ class ZoneEntryCounter:
                     image_path,
                 ]
             )
+
+        if event_type == "enter":
+            try:
+                result = reid_tracker.process_entry(
+                    crop, image_path=image_path, timestamp=now
+                )
+                if result["is_new"]:
+                    print(f"[REID] New person recorded (ID {result['person_id']})")
+                else:
+                    last = result["last_seen_before"]
+                    print(
+                        f"[REID] Person {result['person_id']} recognized - "
+                        f"last seen {last['timestamp']} ({last['image_path']}), "
+                        f"visit #{result['visit_count']} today"
+                    )
+            except Exception:
+                print("[REID] process_entry failed, continuing without it:")
+                traceback.print_exc()
+
+    def _run(self):
+        try:
+            self._update()
+        except Exception:
+            self.crashed = True
+            print("[ZoneEntryCounter] worker thread crashed:")
+            traceback.print_exc()
 
     def _update(self):
         while not self.stopped:
@@ -177,18 +208,18 @@ class ZoneEntryCounter:
             cv2.putText(
                 frame,
                 f"Entries: {self.entry_count}  Exits: {self.exit_count}",
-                (400, 40),
+                (1280, 100),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                1,
                 (255, 0, 0),
                 2,
             )
             cv2.putText(
                 frame,
                 f"Flag: {self.flag}",
-                (400, 75),
+                (1280, 150),
                 cv2.FONT_HERSHEY_SIMPLEX,
-                0.5,
+                1,
                 (255, 0, 0),
                 2,
             )
